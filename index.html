@@ -228,6 +228,22 @@ button { -webkit-tap-highlight-color: transparent; }
 
 .recommendation-tabs { grid-template-columns: repeat(4, minmax(0,1fr)); margin: 0; }
 .recommendation-status { min-height: 1.2em; color: var(--muted); font-size: .82rem; line-height: 1.4; }
+.recommendation-toolbar { display: flex; align-items: center; justify-content: flex-end; min-height: 32px; }
+.recommendation-refresh {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 13px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.075);
+  color: var(--blue);
+  font-size: .73rem;
+  font-weight: 650;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.10);
+}
+.recommendation-refresh:active { transform: scale(.97); }
 .recommendation-status.loading { color: var(--secondary); }
 .recommendation-results { display: grid; gap: 10px; }
 .recommendation-card {
@@ -261,6 +277,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .recommendation-main { min-width: 0; padding-top: 2px; }
 .recommendation-kicker { color: var(--muted); font-size: .7rem; line-height: 1.2; }
 .recommendation-title { margin-top: 5px; font-size: 1.02rem; line-height: 1.16; font-weight: 680; letter-spacing: -.018em; }
+.recommendation-author { margin-top: 4px; color: var(--secondary); font-size: .78rem; line-height: 1.3; font-weight: 560; }
 .recommendation-meta { margin-top: 7px; color: var(--secondary); font-size: .77rem; line-height: 1.3; }
 .recommendation-reason { margin-top: 8px; color: var(--muted); font-size: .76rem; line-height: 1.38; }
 .recommendation-source { margin-top: 8px; color: var(--muted-2); font-size: .64rem; }
@@ -372,7 +389,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .incomplete-item-title { font-weight: 650; }
 .incomplete-item-missing { margin-top: 4px; color: var(--muted); font-size: .72rem; }
 
-.top-ten-panel { display: grid; gap: 12px; }
+.top-ten-panel { display: grid; gap: 12px; margin-top: 18px; }
 .top-ten-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .top-ten-heading { white-space: nowrap; }
 #statsTypeFilter {
@@ -744,6 +761,7 @@ form, .form-grid { display: grid; gap: 9px; }
     let heroCoverCache = [];
     let recommendationType = '';
     let recommendationResults = [];
+    const recommendationCache = Object.fromEntries(TYPES.map(type => [type, []]));
     let recommendationLoading = false;
     let recommendationError = '';
 
@@ -954,16 +972,22 @@ form, .form-grid { display: grid; gap: 9px; }
         : recommendationError
           ? `<div class="recommendation-status recommendation-error">${escapeHtml(recommendationError)}</div>`
           : '';
+      const refresh = recommendationType && recommendationResults.length && !recommendationLoading
+        ? '<div class="recommendation-toolbar"><button type="button" class="recommendation-refresh" data-refresh-recommendations>Nuevas recomendaciones</button></div>'
+        : '';
       const results = recommendationResults.length
         ? `<div class="recommendation-results">${recommendationResults.map((item, index) => {
             const cover = item.image
               ? `<img class="recommendation-cover" src="${escapeHtml(item.image)}" alt="${escapeHtml(item.title)}" loading="lazy">`
               : `<div class="recommendation-cover-placeholder" aria-hidden="true">${TYPE_ICONS[recommendationType] || '🎯'}</div>`;
             const meta = [item.year, item.genre].filter(Boolean).join(' · ');
-            return `<article class="recommendation-card">${cover}<div class="recommendation-main"><div class="recommendation-kicker">Recomendación ${index + 1}</div><div class="recommendation-title">${escapeHtml(item.title)}</div>${meta ? `<div class="recommendation-meta">${escapeHtml(meta)}</div>` : ''}${item.reason ? `<div class="recommendation-reason">${escapeHtml(item.reason)}</div>` : ''}${item.source ? `<div class="recommendation-source">${escapeHtml(item.source)}</div>` : ''}</div></article>`;
+            const author = recommendationType === 'Libro' && item.person
+              ? `<div class="recommendation-author">${escapeHtml(item.person)}</div>`
+              : '';
+            return `<article class="recommendation-card">${cover}<div class="recommendation-main"><div class="recommendation-kicker">Recomendación ${index + 1}</div><div class="recommendation-title">${escapeHtml(item.title)}</div>${author}${meta ? `<div class="recommendation-meta">${escapeHtml(meta)}</div>` : ''}${item.reason ? `<div class="recommendation-reason">${escapeHtml(item.reason)}</div>` : ''}${item.source ? `<div class="recommendation-source">${escapeHtml(item.source)}</div>` : ''}</div></article>`;
           }).join('')}</div>`
         : '';
-      return `<section class="home-section"><h2 class="home-section-heading">🎯 Recomendaciones</h2><div class="category-tabs recommendation-tabs">${buttons}</div>${status}${results}</section>`;
+      return `<section class="home-section"><h2 class="home-section-heading">🎯 Recomendaciones</h2><div class="category-tabs recommendation-tabs">${buttons}</div>${status}${refresh}${results}</section>`;
     }
 
     function recommendationDataset(type) {
@@ -1046,19 +1070,26 @@ form, .form-grid { display: grid; gap: 9px; }
       const match = await searchRecommendationSources(type, recommendation);
       return {
         ...recommendation,
-        title: clean(match?.title) || recommendation.title,
-        originalTitle: clean(match?.originalTitle) || recommendation.originalTitle,
+        title: recommendation.title || clean(match?.title),
+        originalTitle: recommendation.originalTitle || clean(match?.originalTitle),
         year: clean(match?.year) || recommendation.year,
+        person: clean(match?.person),
         genre: clean(match?.genre),
         image: clean(match?.image),
         source: clean(match?.source)
       };
     }
 
-    async function generateRecommendations(type) {
+    async function generateRecommendations(type, force = false) {
       if (recommendationLoading) return;
-      const records = recommendationDataset(type);
       recommendationType = type;
+      if (!force && recommendationCache[type]?.length) {
+        recommendationResults = recommendationCache[type];
+        recommendationError = '';
+        renderHome();
+        return;
+      }
+      const records = recommendationDataset(type);
       recommendationResults = [];
       recommendationError = '';
       recommendationLoading = true;
@@ -1066,7 +1097,7 @@ form, .form-grid { display: grid; gap: 9px; }
 
       try {
         const compactRecords = records.map(item => [item.title, item.genre, item.year, item.rating, item.comment]);
-        const prompt = `Actúa como un recomendador personal exigente. Analiza las notas, géneros y comentarios del usuario, dando más peso a las notas altas y a lo que expresa en sus comentarios, pero teniendo también en cuenta aquello que critica o considera repetitivo. Recomienda exactamente 5 ${TYPE_LABELS[type].toLowerCase()} que no aparezcan ya en su bitácora. Busca un equilibrio entre 3 opciones muy ajustadas a sus gustos, 1 opción algo diferente pero compatible y 1 opción sorprendente. Evita recomendaciones genéricas, secuelas obvias y títulos demasiado parecidos entre sí. Devuelve únicamente un JSON válido, sin Markdown ni texto adicional. Cada motivo debe tener como máximo 12 palabras. Formato exacto: [{"title":"Título habitual en español","originalTitle":"Título original","year":"2024","reason":"Motivo muy breve"}].\n\nCada registro sigue el orden [título, género, año, nota, comentario].\nRegistros del usuario (${type}):\n${JSON.stringify(compactRecords)}`;
+        const prompt = `Actúa como un recomendador personal exigente. Analiza las notas, géneros y comentarios del usuario, dando más peso a las notas altas y a lo que expresa en sus comentarios, pero teniendo también en cuenta aquello que critica o considera repetitivo. Recomienda exactamente 5 ${TYPE_LABELS[type].toLowerCase()} que no aparezcan ya en su bitácora. Busca un equilibrio entre 3 opciones muy ajustadas a sus gustos, 1 opción algo diferente pero compatible y 1 opción sorprendente. Evita recomendaciones genéricas, secuelas obvias y títulos demasiado parecidos entre sí. Devuelve únicamente un JSON válido, sin Markdown ni texto adicional. Cada motivo debe tener como máximo 12 palabras. Usa siempre en "title" el título oficial o más conocido en España, nunca una traducción literal inventada. Formato exacto: [{"title":"Título oficial en España","originalTitle":"Título original","year":"2024","reason":"Motivo muy breve"}].\n\nCada registro sigue el orden [título, género, año, nota, comentario].\nRegistros del usuario (${type}):\n${JSON.stringify(compactRecords)}`;
         const response = await fetch(RECOMMENDATIONS_API, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1084,6 +1115,7 @@ form, .form-grid { display: grid; gap: 9px; }
         const parsed = parseRecommendationText(text);
         if (!parsed.length) throw new Error('Claude no devolvió recomendaciones válidas.');
         recommendationResults = await Promise.all(parsed.map(item => enrichRecommendation(type, item)));
+        recommendationCache[type] = recommendationResults;
       } catch (error) {
         console.error(error);
         recommendationError = clean(error?.message) || 'No se pudieron obtener las recomendaciones. Inténtalo de nuevo.';
@@ -1095,6 +1127,9 @@ form, .form-grid { display: grid; gap: 9px; }
 
     function bindRecommendationButtons() {
       qsa('[data-recommendation-type]', qs('#homeTopRated')).forEach(button => button.addEventListener('click', () => generateRecommendations(button.dataset.recommendationType)));
+      qs('[data-refresh-recommendations]', qs('#homeTopRated'))?.addEventListener('click', () => {
+        if (recommendationType) generateRecommendations(recommendationType, true);
+      });
     }
 
     function renderHome() {
