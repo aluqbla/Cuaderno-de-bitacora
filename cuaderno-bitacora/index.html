@@ -226,6 +226,49 @@ button { -webkit-tap-highlight-color: transparent; }
 .type-tab-icon { font-size: 1.3rem; line-height: 1; }
 .type-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .66rem; font-weight: 600; }
 
+.recommendation-tabs { grid-template-columns: repeat(4, minmax(0,1fr)); margin: 0; }
+.recommendation-status { min-height: 1.2em; color: var(--muted); font-size: .82rem; line-height: 1.4; }
+.recommendation-status.loading { color: var(--secondary); }
+.recommendation-results { display: grid; gap: 10px; }
+.recommendation-card {
+  display: grid;
+  grid-template-columns: 76px minmax(0,1fr);
+  gap: 13px;
+  align-items: start;
+  min-height: 132px;
+  padding: 11px;
+  border-radius: 22px;
+  background: var(--bg-grouped);
+  border: 1px solid var(--separator-soft);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.recommendation-cover,
+.recommendation-cover-placeholder {
+  width: 76px;
+  aspect-ratio: 2/3;
+  object-fit: cover;
+  border-radius: 13px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--separator-soft);
+}
+.recommendation-cover-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--muted-2);
+  font-size: 1.55rem;
+}
+.recommendation-main { min-width: 0; padding-top: 2px; }
+.recommendation-kicker { color: var(--muted); font-size: .7rem; line-height: 1.2; }
+.recommendation-title { margin-top: 5px; font-size: 1.02rem; line-height: 1.16; font-weight: 680; letter-spacing: -.018em; }
+.recommendation-meta { margin-top: 7px; color: var(--secondary); font-size: .77rem; line-height: 1.3; }
+.recommendation-reason { margin-top: 8px; color: var(--muted); font-size: .76rem; line-height: 1.38; }
+.recommendation-source { margin-top: 8px; color: var(--muted-2); font-size: .64rem; }
+.recommendation-error { color: #ff9f9a; }
+@media (min-width: 760px) {
+  .recommendation-results { grid-template-columns: 1fr 1fr; }
+}
+
 .filter-buttons { position: relative; z-index: 30; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-bottom: 12px; }
 .filter-picker { position: relative; min-width: 0; }
 .filter-picker-button {
@@ -667,6 +710,7 @@ form, .form-grid { display: grid; gap: 9px; }
     const ENTRIES_KEY = 'entries';
     const OMDB_API_KEY = '817ab20e';
     const GAME_DB_BASES = ['https://app.lizardbyte.dev/GameDB', 'https://db.lizardbyte.dev'];
+    const RECOMMENDATIONS_API = 'https://cuaderno-recomendaciones.aj-luque.workers.dev/';
 
     const TYPES = ['Película', 'Serie', 'Libro', 'Videojuego'];
     const TYPE_ICONS = { 'Película': '🎬', 'Serie': '📺', 'Libro': '📖', 'Videojuego': '🎮' };
@@ -698,6 +742,10 @@ form, .form-grid { display: grid; gap: 9px; }
     let onlineResults = [];
     let heroCoverCacheKey = '';
     let heroCoverCache = [];
+    let recommendationType = '';
+    let recommendationResults = [];
+    let recommendationLoading = false;
+    let recommendationError = '';
 
     const qs = (selector, root = document) => root.querySelector(selector);
     const qsa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -899,6 +947,156 @@ form, .form-grid { display: grid; gap: 9px; }
         ${showScore ? `<div class="home-item-score">${formatRating(entry.rating)}</div>` : ''}
       </article>`;
     }
+    function recommendationSectionMarkup() {
+      const buttons = TYPES.map(type => `<button type="button" class="category-tab ${recommendationType === type ? 'active' : ''}" data-recommendation-type="${escapeHtml(type)}" aria-label="Recomendar ${escapeHtml(TYPE_LABELS[type].toLowerCase())}"><span class="type-tab-icon">${TYPE_ICONS[type]}</span><span class="type-tab-label">${escapeHtml(TYPE_LABELS[type])}</span></button>`).join('');
+      const status = recommendationLoading
+        ? '<div class="recommendation-status loading">Analizando tu bitácora y buscando portadas…</div>'
+        : recommendationError
+          ? `<div class="recommendation-status recommendation-error">${escapeHtml(recommendationError)}</div>`
+          : '';
+      const results = recommendationResults.length
+        ? `<div class="recommendation-results">${recommendationResults.map((item, index) => {
+            const cover = item.image
+              ? `<img class="recommendation-cover" src="${escapeHtml(item.image)}" alt="${escapeHtml(item.title)}" loading="lazy">`
+              : `<div class="recommendation-cover-placeholder" aria-hidden="true">${TYPE_ICONS[recommendationType] || '🎯'}</div>`;
+            const meta = [item.year, item.genre].filter(Boolean).join(' · ');
+            return `<article class="recommendation-card">${cover}<div class="recommendation-main"><div class="recommendation-kicker">Recomendación ${index + 1}</div><div class="recommendation-title">${escapeHtml(item.title)}</div>${meta ? `<div class="recommendation-meta">${escapeHtml(meta)}</div>` : ''}${item.reason ? `<div class="recommendation-reason">${escapeHtml(item.reason)}</div>` : ''}${item.source ? `<div class="recommendation-source">${escapeHtml(item.source)}</div>` : ''}</div></article>`;
+          }).join('')}</div>`
+        : '';
+      return `<section class="home-section"><h2 class="home-section-heading">🎯 Recomendaciones</h2><div class="category-tabs recommendation-tabs">${buttons}</div>${status}${results}</section>`;
+    }
+
+    function recommendationDataset(type) {
+      return supportedEntries()
+        .filter(entry => entry.type === type)
+        .map(entry => ({
+          title: clean(entry.title),
+          genre: clean(entry.genre),
+          year: clean(entry.year),
+          rating: clean(entry.rating),
+          comment: clean(entry.comments)
+        }));
+    }
+
+    function parseRecommendationText(text) {
+      const cleaned = clean(text).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+      let data;
+      try { data = JSON.parse(cleaned); }
+      catch (_) {
+        const start = cleaned.indexOf('[');
+        const end = cleaned.lastIndexOf(']');
+        if (start < 0 || end <= start) throw new Error('Claude no devolvió una lista válida.');
+        data = JSON.parse(cleaned.slice(start, end + 1));
+      }
+      if (!Array.isArray(data)) throw new Error('Claude no devolvió una lista válida.');
+      return data.map(item => ({
+        title: clean(item?.title || item?.titulo),
+        originalTitle: clean(item?.originalTitle || item?.tituloOriginal || item?.original_title),
+        year: normalizeYear(item?.year || item?.año),
+        reason: clean(item?.reason || item?.motivo)
+      })).filter(item => item.title).slice(0, 5);
+    }
+
+    function recommendationMatchScore(candidate, recommendation) {
+      const candidateTitles = unique([candidate?.title, candidate?.originalTitle].map(normalizeText));
+      const wantedTitles = unique([recommendation?.title, recommendation?.originalTitle].map(normalizeText));
+      let score = 0;
+      for (const wanted of wantedTitles) {
+        for (const candidateTitle of candidateTitles) {
+          if (!wanted || !candidateTitle) continue;
+          if (wanted === candidateTitle) score = Math.max(score, 1000);
+          else if (candidateTitle.includes(wanted) || wanted.includes(candidateTitle)) score = Math.max(score, 760 - Math.abs(candidateTitle.length - wanted.length));
+          else {
+            const tokens = wanted.split(' ').filter(token => token.length > 2);
+            const common = tokens.filter(token => candidateTitle.includes(token)).length;
+            if (tokens.length) score = Math.max(score, Math.round(520 * common / tokens.length));
+          }
+        }
+      }
+      const wantedYear = normalizeYear(recommendation?.year);
+      const candidateYear = normalizeYear(candidate?.year);
+      if (wantedYear && candidateYear) score += wantedYear === candidateYear ? 170 : -Math.min(120, Math.abs(Number(wantedYear) - Number(candidateYear)) * 24);
+      if (candidate?.image) score += 45;
+      if (candidate?.genre) score += 15;
+      return score;
+    }
+
+    async function searchRecommendationSources(type, recommendation) {
+      const queries = unique([recommendation.originalTitle, recommendation.title].map(clean)).filter(Boolean);
+      let results = [];
+      for (const query of queries) {
+        try {
+          const found = type === 'Libro'
+            ? await searchOpenLibrary(query)
+            : type === 'Videojuego'
+              ? await searchGameDb(query)
+              : await searchOmdb(type, query);
+          results = results.concat(found || []);
+        } catch (error) {
+          console.warn('No se pudo enriquecer una recomendación:', query, error);
+        }
+      }
+      const best = results
+        .map(item => ({ item, score: recommendationMatchScore(item, recommendation) }))
+        .sort((a, b) => b.score - a.score)[0];
+      return best && best.score >= 430 ? best.item : null;
+    }
+
+    async function enrichRecommendation(type, recommendation) {
+      const match = await searchRecommendationSources(type, recommendation);
+      return {
+        ...recommendation,
+        title: clean(match?.title) || recommendation.title,
+        originalTitle: clean(match?.originalTitle) || recommendation.originalTitle,
+        year: clean(match?.year) || recommendation.year,
+        genre: clean(match?.genre),
+        image: clean(match?.image),
+        source: clean(match?.source)
+      };
+    }
+
+    async function generateRecommendations(type) {
+      if (recommendationLoading) return;
+      const records = recommendationDataset(type);
+      recommendationType = type;
+      recommendationResults = [];
+      recommendationError = '';
+      recommendationLoading = true;
+      renderHome();
+
+      try {
+        const compactRecords = records.map(item => [item.title, item.genre, item.year, item.rating, item.comment]);
+        const prompt = `Actúa como un recomendador personal exigente. Analiza las notas, géneros y comentarios del usuario, dando más peso a las notas altas y a lo que expresa en sus comentarios, pero teniendo también en cuenta aquello que critica o considera repetitivo. Recomienda exactamente 5 ${TYPE_LABELS[type].toLowerCase()} que no aparezcan ya en su bitácora. Busca un equilibrio entre 3 opciones muy ajustadas a sus gustos, 1 opción algo diferente pero compatible y 1 opción sorprendente. Evita recomendaciones genéricas, secuelas obvias y títulos demasiado parecidos entre sí. Devuelve únicamente un JSON válido, sin Markdown ni texto adicional. Cada motivo debe tener como máximo 12 palabras. Formato exacto: [{"title":"Título habitual en español","originalTitle":"Título original","year":"2024","reason":"Motivo muy breve"}].\n\nCada registro sigue el orden [título, género, año, nota, comentario].\nRegistros del usuario (${type}):\n${JSON.stringify(compactRecords)}`;
+        const response = await fetch(RECOMMENDATIONS_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt })
+        });
+        const data = await response.json();
+        if (!response.ok || data?.type === 'error' || data?.error) {
+          const message = data?.error?.message || data?.error || 'No se pudieron generar las recomendaciones.';
+          throw new Error(message);
+        }
+        if (data?.stop_reason === 'max_tokens') {
+          throw new Error('La respuesta de Claude quedó incompleta porque el límite del Worker es demasiado bajo.');
+        }
+        const text = Array.isArray(data?.content) ? data.content.map(part => part?.text || '').join('') : '';
+        const parsed = parseRecommendationText(text);
+        if (!parsed.length) throw new Error('Claude no devolvió recomendaciones válidas.');
+        recommendationResults = await Promise.all(parsed.map(item => enrichRecommendation(type, item)));
+      } catch (error) {
+        console.error(error);
+        recommendationError = clean(error?.message) || 'No se pudieron obtener las recomendaciones. Inténtalo de nuevo.';
+      } finally {
+        recommendationLoading = false;
+        renderHome();
+      }
+    }
+
+    function bindRecommendationButtons() {
+      qsa('[data-recommendation-type]', qs('#homeTopRated')).forEach(button => button.addEventListener('click', () => generateRecommendations(button.dataset.recommendationType)));
+    }
+
     function renderHome() {
       renderHeroCovers();
       const latestMovie = supportedEntries()
@@ -915,9 +1113,10 @@ form, .form-grid { display: grid; gap: 9px; }
       qs('#homeTopRated').innerHTML = `<div class="home-dashboard">${renderCountRow()}
         <section class="home-section"><h2 class="home-section-heading">🍿 Última película</h2>${latestMovie ? entryCardMarkup(latestMovie) : '<div class="home-empty">Todavía no hay ninguna película vista.</div>'}</section>
         <section class="home-section"><h2 class="home-section-heading">⏱️ En proceso</h2><div class="home-progress-stack">${progressSections || '<div class="home-empty">No hay series, libros ni videojuegos en proceso.</div>'}</div></section>
-        <section class="home-section"><h2 class="home-section-heading">🎯 Recomendaciones</h2><div class="home-recommendations-stack" id="homeRecommendations"><div class="home-empty">Todavía no hay recomendaciones que mostrar.</div></div></section>
+        ${recommendationSectionMarkup()}
       </div>`;
       bindOpenCards(qs('#homeTopRated'));
+      bindRecommendationButtons();
     }
 
     function renderTypeOptions() {
