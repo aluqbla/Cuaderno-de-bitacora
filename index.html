@@ -744,15 +744,27 @@ form, .form-grid { display: grid; gap: 9px; }
   (() => {
     'use strict';
 
-    const DB_NAME = 'cuaderno_bitacora_nueva_app';
-    const DB_VERSION = 1;
-    const STORE_NAME = 'kv';
-    const ENTRIES_KEY = 'entries';
-    const OMDB_API_KEY = '817ab20e';
-    const GAME_DB_BASES = ['https://app.lizardbyte.dev/GameDB', 'https://db.lizardbyte.dev'];
-    const RECOMMENDATIONS_API = 'https://cuaderno-recomendaciones.aj-luque.workers.dev/';
+    // ─────────────────────────────────────────────────────────────
+    // Configuración de la aplicación y servicios externos
+    // ─────────────────────────────────────────────────────────────
+    const CONFIG = Object.freeze({
+      appVersion: '2.0',
+      schemaVersion: 1,
+      database: Object.freeze({
+        name: 'cuaderno_bitacora_nueva_app',
+        version: 1,
+        store: 'kv',
+        entriesKey: 'entries',
+        recoveryKey: 'entries_recovery'
+      }),
+      services: Object.freeze({
+        omdbApiKey: '817ab20e',
+        gameDbBases: Object.freeze(['https://app.lizardbyte.dev/GameDB', 'https://db.lizardbyte.dev']),
+        recommendationsApi: 'https://cuaderno-recomendaciones.aj-luque.workers.dev/'
+      })
+    });
 
-    const TYPES = ['Película', 'Serie', 'Libro', 'Videojuego'];
+    const TYPES = Object.freeze(['Película', 'Serie', 'Libro', 'Videojuego']);
     const TYPE_ICONS = { 'Película': '🎬', 'Serie': '📺', 'Libro': '📖', 'Videojuego': '🎮' };
     const TYPE_LABELS = { 'Película': 'Películas', 'Serie': 'Series', 'Libro': 'Libros', 'Videojuego': 'Videojuegos' };
     const TYPE_TABS = [['Todos', 'Todo', '🧭'], ['Película', 'Películas', '🎬'], ['Serie', 'Series', '📺'], ['Libro', 'Libros', '📖'], ['Videojuego', 'Videojuegos', '🎮']];
@@ -789,6 +801,9 @@ form, .form-grid { display: grid; gap: 9px; }
     let recommendationLoading = false;
     let recommendationError = '';
 
+    // ─────────────────────────────────────────────────────────────
+    // Utilidades compartidas
+    // ─────────────────────────────────────────────────────────────
     const qs = (selector, root = document) => root.querySelector(selector);
     const qsa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
     const clean = value => value === undefined || value === null ? '' : String(value).trim();
@@ -810,6 +825,9 @@ form, .form-grid { display: grid; gap: 9px; }
       return clean(raw).split(',').map(part => part.trim()).filter(Boolean).map(part => GENRE_TRANSLATIONS[part] || part).join(', ');
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Modelo de datos, validación y migraciones
+    // ─────────────────────────────────────────────────────────────
     function normalizeEntry(raw) {
       if (!raw || typeof raw !== 'object') return null;
       const type = TYPES.includes(raw.type) ? raw.type : '';
@@ -838,14 +856,36 @@ form, .form-grid { display: grid; gap: 9px; }
         updatedAt: clean(raw.updatedAt) || clean(raw.createdAt) || todayStamp()
       };
     }
+    function migrateEntry(raw) {
+      // Punto único para futuras migraciones. La versión 2.0 conserva
+      // compatibilidad con los nombres de campos históricos ya conocidos.
+      return normalizeEntry(raw);
+    }
+    function validateImportedRows(rows) {
+      if (!Array.isArray(rows)) throw new Error('El archivo JSON no contiene una lista de registros válida.');
+      if (rows.length > 10000) throw new Error('La copia contiene demasiados registros para importarse con seguridad.');
+
+      const normalized = rows.map(migrateEntry).filter(Boolean);
+      if (rows.length && !normalized.length) throw new Error('No se ha encontrado ningún registro compatible.');
+
+      const ids = new Set();
+      normalized.forEach(entry => {
+        if (ids.has(entry.id)) entry.id = makeId();
+        ids.add(entry.id);
+      });
+      return normalized;
+    }
     function supportedEntries() { return entries.filter(entry => TYPES.includes(entry.type)); }
 
+    // ─────────────────────────────────────────────────────────────
+    // Persistencia local (IndexedDB)
+    // ─────────────────────────────────────────────────────────────
     function openDB() {
       return new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        const request = indexedDB.open(CONFIG.database.name, CONFIG.database.version);
         request.onupgradeneeded = () => {
           const database = request.result;
-          if (!database.objectStoreNames.contains(STORE_NAME)) database.createObjectStore(STORE_NAME);
+          if (!database.objectStoreNames.contains(CONFIG.database.store)) database.createObjectStore(CONFIG.database.store);
         };
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
@@ -853,30 +893,42 @@ form, .form-grid { display: grid; gap: 9px; }
     }
     function idbGet(key) {
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, 'readonly');
-        const request = tx.objectStore(STORE_NAME).get(key);
+        const tx = db.transaction(CONFIG.database.store, 'readonly');
+        const request = tx.objectStore(CONFIG.database.store).get(key);
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
     }
     function idbSet(key, value) {
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        tx.objectStore(STORE_NAME).put(value, key);
+        const tx = db.transaction(CONFIG.database.store, 'readwrite');
+        tx.objectStore(CONFIG.database.store).put(value, key);
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
+      });
+    }
+    async function saveRecoveryCopy() {
+      if (!db || !entries.length) return;
+      await idbSet(CONFIG.database.recoveryKey, {
+        appVersion: CONFIG.appVersion,
+        schemaVersion: CONFIG.schemaVersion,
+        savedAt: todayStamp(),
+        entries: supportedEntries()
       });
     }
     async function requestPersistentStorage() {
       try { if (navigator.storage?.persist) await navigator.storage.persist(); } catch (_) {}
     }
     async function loadEntries() {
-      const data = await idbGet(ENTRIES_KEY);
-      entries = Array.isArray(data) ? data.map(normalizeEntry).filter(Boolean) : [];
+      const data = await idbGet(CONFIG.database.entriesKey);
+      entries = Array.isArray(data) ? validateImportedRows(data) : [];
       await saveEntries();
     }
-    async function saveEntries() { await idbSet(ENTRIES_KEY, supportedEntries()); }
+    async function saveEntries() { await idbSet(CONFIG.database.entriesKey, supportedEntries()); }
 
+    // ─────────────────────────────────────────────────────────────
+    // Selectores y formato de datos
+    // ─────────────────────────────────────────────────────────────
     function getPrimaryDate(entry) {
       if (!entry) return '';
       if (entry.type === 'Videojuego') return entry.playedYear || entry.year || '';
@@ -947,6 +999,9 @@ form, .form-grid { display: grid; gap: 9px; }
       return supportedEntries().sort((a, b) => getSortDateKey(b).localeCompare(getSortDateKey(a)) || clean(b.updatedAt).localeCompare(clean(a.updatedAt))).slice(0, limit);
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Interfaz: modales, navegación y renderizado
+    // ─────────────────────────────────────────────────────────────
     function lockBody() {
       scrollLockY = window.scrollY || 0;
       document.body.classList.add('modal-open');
@@ -1139,7 +1194,7 @@ form, .form-grid { display: grid; gap: 9px; }
       try {
         const compactRecords = records.map(item => [item.title, item.genre, item.year, item.rating, item.comment]);
         const prompt = `Actúa como un recomendador personal exigente. Analiza las notas, géneros y comentarios del usuario, dando más peso a las notas altas y a lo que expresa en sus comentarios, pero teniendo también en cuenta aquello que critica o considera repetitivo. Recomienda exactamente 5 ${TYPE_LABELS[type].toLowerCase()} que no aparezcan ya en su bitácora. Busca un equilibrio entre 3 opciones muy ajustadas a sus gustos, 1 opción algo diferente pero compatible y 1 opción sorprendente. Evita recomendaciones genéricas, secuelas obvias y títulos demasiado parecidos entre sí. Devuelve únicamente un JSON válido, sin Markdown ni texto adicional. Cada motivo debe tener como máximo 12 palabras. Usa siempre en "title" el título oficial de estreno o publicación en España. No traduzcas literalmente títulos que en España conservaron el original: por ejemplo, usa "Braveheart" y "Master and Commander: Al otro lado del mundo", nunca "Corazón valiente" ni "Duelo de titanes". En libros y videojuegos aplica igualmente el título oficial publicado en España. Formato exacto: [{"title":"Título oficial en España","originalTitle":"Título original","year":"2024","reason":"Motivo muy breve"}].\n\nCada registro sigue el orden [título, género, año, nota, comentario].\nRegistros del usuario (${type}):\n${JSON.stringify(compactRecords)}`;
-        const response = await fetch(RECOMMENDATIONS_API, {
+        const response = await fetch(CONFIG.services.recommendationsApi, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt })
@@ -1407,6 +1462,9 @@ form, .form-grid { display: grid; gap: 9px; }
     }
     function bindOpenCards(root) { qsa('[data-open-id]', root).forEach(card => card.addEventListener('click', () => openDetail(card.dataset.openId))); }
 
+    // ─────────────────────────────────────────────────────────────
+    // Formularios y detalles de registros
+    // ─────────────────────────────────────────────────────────────
     function updateStatusOptions(selected = '') {
       const type = qs('#entryType').value || 'Película';
       const statuses = STATUS_MAP[type] || ['Pendiente'];
@@ -1618,6 +1676,9 @@ form, .form-grid { display: grid; gap: 9px; }
     }
 
     function setOnlineStatus(message) { qs('#onlineStatus').textContent = message || ''; }
+    // ─────────────────────────────────────────────────────────────
+    // Integraciones externas: OMDb, Open Library, GameDB y Anthropic
+    // ─────────────────────────────────────────────────────────────
     async function fetchJson(url, options = {}) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
@@ -1637,11 +1698,11 @@ form, .form-grid { display: grid; gap: 9px; }
     }
     async function searchOmdb(type, query) {
       const omdbType = type === 'Serie' ? 'series' : 'movie';
-      const searchData = await fetchJson(`https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&s=${encodeURIComponent(query)}&type=${omdbType}`);
+      const searchData = await fetchJson(`https://www.omdbapi.com/?apikey=${CONFIG.services.omdbApiKey}&s=${encodeURIComponent(query)}&type=${omdbType}`);
       const rows = (searchData.Search || []).slice(0, 5);
       const results = [];
       for (const row of rows) {
-        const detail = await fetchJson(`https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${encodeURIComponent(row.imdbID)}&plot=short`);
+        const detail = await fetchJson(`https://www.omdbapi.com/?apikey=${CONFIG.services.omdbApiKey}&i=${encodeURIComponent(row.imdbID)}&plot=short`);
         const spanishTitle = await fetchSpanishTitleFromWikidata(row.imdbID);
         results.push({
           type,
@@ -1723,7 +1784,7 @@ form, .form-grid { display: grid; gap: 9px; }
     }
     async function fetchGameDbPath(path) {
       let lastError;
-      for (const base of GAME_DB_BASES) {
+      for (const base of CONFIG.services.gameDbBases) {
         try { return await fetchJson(`${base}/${path.replace(/^\//, '')}`, { mode: 'cors', cache: 'force-cache' }); }
         catch (error) { lastError = error; }
       }
@@ -1840,6 +1901,9 @@ form, .form-grid { display: grid; gap: 9px; }
       setOnlineStatus('Datos cargados en el formulario.');
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Importación, exportación y recuperación
+    // ─────────────────────────────────────────────────────────────
     async function exportJson() {
       const blob = new Blob([JSON.stringify(supportedEntries(), null, 2)], { type: 'application/json' });
       const date = new Date();
@@ -1853,15 +1917,23 @@ form, .form-grid { display: grid; gap: 9px; }
       URL.revokeObjectURL(link.href);
     }
     async function importJson(file) {
+      if (!file || file.size > 100 * 1024 * 1024) throw new Error('El archivo es demasiado grande.');
       const text = await file.text();
       const data = JSON.parse(text);
-      const rows = Array.isArray(data) ? data : Array.isArray(data.entries) ? data.entries : null;
-      if (!rows) throw new Error('El archivo JSON no contiene una lista de registros válida.');
-      entries = rows.map(normalizeEntry).filter(Boolean);
+      const rows = Array.isArray(data) ? data : data?.entries;
+      const importedEntries = validateImportedRows(rows);
+
+      // Copia interna de recuperación antes de sustituir la biblioteca.
+      await saveRecoveryCopy();
+      entries = importedEntries;
       await saveEntries();
       renderAll();
+      return importedEntries.length;
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Eventos y ciclo de vida
+    // ─────────────────────────────────────────────────────────────
     function bindEvents() {
       qsa('.nav-btn').forEach(btn => btn.addEventListener('click', () => showScreen(btn.dataset.screen)));
       qs('#openAddFromNav').addEventListener('click', () => { clearForm(); openModal('formModal'); });
@@ -1884,7 +1956,7 @@ form, .form-grid { display: grid; gap: 9px; }
       window.addEventListener('resize', closeFilterMenus);
       qs('#clearQuickFilters').addEventListener('click', () => { qs('#searchInput').value = ''; libraryType = ''; qs('#listFilter').value = 'Todas'; qs('#sortFilter').value = 'dateDesc'; qs('#statusQuickFilter').value = 'Todos'; closeFilterMenus(); renderHeroCovers('', true); renderLibrary(); });
       qs('#exportButton').addEventListener('click', exportJson);
-      qs('#importInput').addEventListener('change', async event => { const file = event.target.files?.[0]; if (!file) return; try { await importJson(file); alert('Copia importada correctamente.'); } catch (error) { console.error(error); alert('No se pudo importar el archivo JSON.'); } finally { event.target.value = ''; } });
+      qs('#importInput').addEventListener('change', async event => { const file = event.target.files?.[0]; if (!file) return; try { const count = await importJson(file); alert(`Copia importada correctamente (${count} registros).`); } catch (error) { console.error(error); alert(`No se pudo importar el archivo JSON. ${error.message || ''}`.trim()); } finally { event.target.value = ''; } });
       qsa('[data-close]').forEach(btn => btn.addEventListener('click', () => closeModal(btn.dataset.close)));
       qsa('.modal-backdrop').forEach(backdrop => backdrop.addEventListener('click', event => { if (event.target === backdrop) closeModal(backdrop.id); }));
       qs('#coverLightboxBack').addEventListener('click', closeCoverLightbox);
@@ -1902,7 +1974,14 @@ form, .form-grid { display: grid; gap: 9px; }
     }
     init().catch(error => {
       console.error(error);
-      document.body.innerHTML = '<div style="padding:24px;color:white;font-family:var(--font-sans);">No se pudo iniciar la aplicación.</div>';
+      document.body.innerHTML = `
+        <main style="max-width:680px;margin:0 auto;padding:40px 22px;color:white;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;">
+          <h1 style="font-size:1.6rem;">No se pudo iniciar la aplicación</h1>
+          <p style="color:rgba(235,235,245,.72);line-height:1.55;">Tus copias JSON no se han modificado. Cierra y vuelve a abrir la aplicación. Si el problema continúa, importa la última copia guardada desde una versión funcional.</p>
+          <button id="retryInit" style="min-height:46px;padding:0 18px;border:0;border-radius:15px;background:#0a84ff;color:white;font:inherit;font-weight:650;">Reintentar</button>
+          <details style="margin-top:22px;color:rgba(235,235,245,.55);"><summary>Información técnica</summary><pre style="white-space:pre-wrap;">${escapeHtml(error?.message || String(error))}</pre></details>
+        </main>`;
+      qs('#retryInit')?.addEventListener('click', () => location.reload());
     });
   })();
   </script>
